@@ -7,5 +7,9 @@ The Residual Neural Network trains on Sentinel2 images, gathered by using the pu
 ### Classification Specification
 The classifier can be expanded to many uses. It uses a softmax to determine the most likely 'label', which in our case can be treated as many things, often corresponding to CDL classes.
 
+### Running the Program
+To run and train the network, run the script t2v_train.py. This is a heavy compute required program and takes a while to process. For the classifier and testing the model against CDL, run the script mlpClassifier.py, which will output the accuracy of the recently trained model against 1000 given CDL tiles. To classify your own Sentinel2 image, run the script sentinelClassifier.py with your own image path inputted into the program.
+
+Enjoy!
 
 
