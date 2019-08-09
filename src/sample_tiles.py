@@ -2,7 +2,7 @@ import numpy as np
 import gdal
 import os
 import random
-from fix_data import jp2loader, tifloader
+from fix_data import jp2loader, tifloader, ziploader
 import tempfile
 import matplotlib.pyplot as plt
 
@@ -10,28 +10,15 @@ def load_img(path, val_type='uint8', bands_only=False, num_bands=4):
     """
     Loads an image using gdal, returns it as an array.
     """
-    if os.path.isdir(path):
-        jp2s = 5
-        for root, dirs, files in os.walk(path):
-            jp2s = files
-
-        image = []
-        for x in reversed(jp2s):
-            file = os.path.join(path, x)
-            img = jp2loader(file)
-            image.append(img)
-        image = np.array(image)
-        image = np.moveaxis(image, 0, -1)
-    else:
-        image = tifloader(path)
-    return image
+    return ziploader(path)
 
 #Not used anymore
 def loaded_img(img_file, val_type='uint8', bands_only=False, num_bands=3):
     obj = gdal.Open(img_file)
     img = obj.ReadAsArray().astype(np.uint8)
     img = np.moveaxis(img, 0, -1)
-    if bands_only: img = img[:,:,:num_bands]
+    if bands_only:
+        img = img[:,:,:num_bands]
     return img
 
 def get_triplet_imgs(img_dir, img_ext='.png', n_triplets=1000):

@@ -4,131 +4,34 @@ import torch
 import glob
 import os
 import numpy as np
-import random
-import gdal
 from src.data_utils import clip_and_scale_image
-from src.sample_tiles import sample_anchor, sample_distant_diff, \
-                                sample_distant_same, sample_neighbor, extract_tile,\
-                                load_img, loaded_img
-import cv2
-
-
-class loadedImage:
-    """
-    Class to contain the data of the images, as well as the shape (to minimize compute time downstream)
-    """
-    def __init__(self, image, shape):
-        self.image = image
-        self.shape = shape
-
-def makeID(img_dir, nameList, tileInfo):
-    imgs_loaded={}
-    for idx, name in enumerate(nameList):
-        path = os.path.join(img_dir, name)
-        imgs_loaded[name] = loadImage(path,tileInfo)
-        print("Loaded image " + str(idx+1) +" out of " + str(len(nameList)))
-
-    return imgs_loaded
-
-
-def loadImage(path, tileInfo):
-    """
-    Loads all the recognized images in the directory from the triplet table, returns
-    a dictionary of images keyed on the image name. Images are padded with the provided
-    tile size and neighborhood (from tileInfo object)
-    """
-    img = load_img(path, val_type=tileInfo.val_type,
-                   bands_only=tileInfo.bands_only)
-    img_padded = np.pad(img, pad_width=[(tileInfo.tile_radius, tileInfo.tile_radius),
-                                            (tileInfo.tile_radius, tileInfo.tile_radius), (0,0)],
-
-                            mode='reflect')
-    img_shape = img_padded.shape
-    return loadedImage(img_padded,img_shape)
-
-#Not used anmymore
-def loadAnImage(img_dir, name, tileInfo):
-    img = loaded_img(os.path.join(img_dir, name), val_type=tileInfo.val_type,
-                   bands_only=tileInfo.bands_only)
-    img_padded = np.pad(img, pad_width=[(tileInfo.tile_radius, tileInfo.tile_radius),
-                                            (tileInfo.tile_radius, tileInfo.tile_radius), (0,0)],
-                            mode='reflect')
-    img_shape = img_padded.shape
-    return loadedImage(img_padded,img_shape)
-
-
-
-def makeImageDict(img_dir,nameList, tileInfo):
-    """
-    Makes a dictionary of image objects keyed by name
-    """
-    imgs_loaded={}
-    for name in nameList:
-        imgs_loaded[name]=loadAnImage(img_dir,name, tileInfo)
-    return imgs_loaded
-
-class tileInfo:
-    """
-    Class to hold basic tile information, avoids repeating computations every time we get a tile
-    """
-    def __init__(self,tile_size,neighborhood,val_type,bands_only=False):
-        self.tile_size = tile_size
-        self.neighborhood = neighborhood
-        self.size_even = (tile_size % 2 == 0)
-        self.tile_radius = tile_size // 2
-        self.val_type=val_type
-        self.bands_only=bands_only
-
-
-def getTriplet(imgs_loaded, tileInfo):
-    """
-    Uses given dict of images and tileInfo object to load and return a triplet from the dict of images
-    """
-    # pick a main image and a distant image from the keys for the imgs_loaded dict
-    mainImage = random.choice(list(imgs_loaded))
-    distantImage = mainImage
-
-    #get the anchor and neighbor coords from mainImage
-    xa, ya = sample_anchor(imgs_loaded[mainImage].shape, tileInfo.tile_radius)
-    xn, yn = sample_neighbor(imgs_loaded[mainImage].shape, xa, ya, tileInfo.neighborhood, tileInfo.tile_radius)
-
-    #actually extract the tiles from the main image
-    tile_anchor = extract_tile(imgs_loaded[mainImage].image, xa, ya, tileInfo.tile_radius)
-    tile_neighbor = extract_tile(imgs_loaded[mainImage].image, xn, yn, tileInfo.tile_radius)
-    if tileInfo.size_even:
-        tile_anchor = tile_anchor[:-1,:-1]
-        tile_neighbor = tile_neighbor[:-1,:-1]
-    #if the distant tile is from the same image
-        #get the coords and extract the distant tile
-    xd, yd = sample_distant_same(imgs_loaded[distantImage].shape, xa, ya, tileInfo.neighborhood, tileInfo.tile_radius)
-    tile_distant = extract_tile(imgs_loaded[distantImage].image, xd, yd, tileInfo.tile_radius)
-    if tileInfo.size_even:
-        tile_distant = tile_distant[:-1,:-1]
-    #distant tile is from another image
-
-    return tile_anchor, tile_neighbor, tile_distant
-
-
 
 
 class TileTripletsDataset(Dataset):
 
-    def __init__(self, imgs_loaded, tileInfo, transform=None, n_triplets=1000,
+    def __init__(self, tile_dir, transform=None, n_triplets=None,
         pairs_only=True):
+        self.tile_dir = tile_dir
+        self.tile_files = glob.glob(os.path.join(self.tile_dir, '*'))
         self.transform = transform
         self.n_triplets = n_triplets
-        self.imgs_loaded = imgs_loaded
-        self.tileInfo = tileInfo
+        self.pairs_only = pairs_only
 
     def __len__(self):
-        if self.n_triplets:
+        if self.n_triplets: 
             return self.n_triplets
         else:
             return len(self.tile_files) // 3
 
     def __getitem__(self, idx):
-        #to "stream," just ignore the ID and call our function to generate a triplet
-        a, n, d = getTriplet(self.imgs_loaded, self.tileInfo)
+        a = np.load(os.path.join(self.tile_dir, '{}anchor.npy'.format(idx)))
+        n = np.load(os.path.join(self.tile_dir, '{}neighbor.npy'.format(idx)))
+        if self.pairs_only:
+            name = np.random.choice(['anchor', 'neighbor', 'distant'])
+            d_idx = np.random.randint(0, self.n_triplets)
+            d = np.load(os.path.join(self.tile_dir, '{}{}.npy'.format(d_idx, name)))
+        else:
+            d = np.load(os.path.join(self.tile_dir, '{}distant.npy'.format(idx)))
         a = np.moveaxis(a, -1, 0)
         n = np.moveaxis(n, -1, 0)
         d = np.moveaxis(d, -1, 0)
@@ -220,8 +123,7 @@ class ToFloatTensor(object):
 ### TRANSFORMS ###
 
 
-
-def triplet_dataloader(imgs_loaded, tileInfo, img_type, bands=2, augment=True,
+def triplet_dataloader(img_type, tile_dir, bands=4, augment=True,
     batch_size=4, shuffle=True, num_workers=4, n_triplets=None,
     pairs_only=True):
     """
@@ -238,8 +140,10 @@ def triplet_dataloader(imgs_loaded, tileInfo, img_type, bands=2, augment=True,
         transform_list.append(RandomFlipAndRotate())
     transform_list.append(ToFloatTensor())
     transform = transforms.Compose(transform_list)
-    dataset = TileTripletsDataset(imgs_loaded, tileInfo, transform=transform,
+    dataset = TileTripletsDataset(tile_dir, transform=transform,
         n_triplets=n_triplets, pairs_only=pairs_only)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle,
         num_workers=num_workers)
     return dataloader
+
+    

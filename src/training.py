@@ -1,19 +1,25 @@
 import numpy as np
 from time import time
+from torch.nn.utils import clip_grad_norm_
 from torch.autograd import Variable
 from src.datasets import triplet_dataloader
+import torch
 
-def prep_triplets(triplets, cuda):
+def prep_triplets(triplets, device=None):
     """
     Takes a batch of triplets and converts them into Pytorch variables
     and puts them on GPU if available.
     """
     a, n, d = (Variable(triplets['anchor']), Variable(triplets['neighbor']), Variable(triplets['distant']))
-    if cuda:
-    	a, n, d = (a.cuda(), n.cuda(), d.cuda())
+    a, n, d = (a.to(device=device), n.to(device=device), d.to(device=device))
     return (a, n, d)
 
-def train_triplet_epoch(model, cuda, dataloader, optimizer, epoch, margin=1,
+def prep_tile(tile, label, device=None):
+    tile, label = (Variable(tile.float(), requires_grad=True), Variable(label.float(),requires_grad=True))
+    tile, label = (tile.to(device), label.to(device))
+    return (tile, label)
+
+def train_triplet_epoch(model, dataloader, optimizer, epoch,device=None, margin=1,
     l2=0, print_every=100, t0=None):
     """
     Trains a model for one epoch using the provided dataloader.
@@ -25,15 +31,16 @@ def train_triplet_epoch(model, cuda, dataloader, optimizer, epoch, margin=1,
     n_train, n_batches = len(dataloader.dataset), len(dataloader)
     print_sum_loss = 0
     for idx, triplets in enumerate(dataloader):
-        p, n, d = prep_triplets(triplets, cuda)
+        p, n, d = prep_triplets(triplets, device=device)
+
         optimizer.zero_grad()
         loss, l_n, l_d, l_nd = model.loss(p, n, d, margin=margin, l2=l2)
         loss.backward()
         optimizer.step()
-        sum_loss += loss.data
-        sum_l_n += l_n.data
-        sum_l_d += l_d.data
-        sum_l_nd += l_nd.data
+        sum_loss += loss.item()
+        sum_l_n += l_n.item()
+        sum_l_d += l_d.item()
+        sum_l_nd += l_nd.item()
         if (idx + 1) * dataloader.batch_size % print_every == 0:
             print_avg_loss = (sum_loss - print_sum_loss) / (
                 print_every / dataloader.batch_size)

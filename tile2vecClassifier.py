@@ -1,0 +1,221 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# ## Tile2Vec KNN Classifier
+# Provides a UI to create classifications of a raster image, and then feeds these into a KNN model to classify the image according to the classes created
+
+# In[1]:
+
+
+import sys
+import os
+import torch
+from torch import optim
+from time import time
+import numpy as np
+import random
+from osgeo import gdal,ogr,osr
+from sklearn.neighbors import KNeighborsClassifier
+import matplotlib.pyplot as plt
+import matplotlib.image as mpimg
+import matplotlib.patches as patches
+import cv2
+
+
+# In[2]:
+
+
+tile2vec_dir = 'images'#Path to your Tile2Vec Directory
+
+from src.datasets import TileTripletsDataset, GetBands, RandomFlipAndRotate, ClipAndScale, ToFloatTensor, triplet_dataloader
+from tilenetDownsized import make_tilenet, TileNet
+from src.training import prep_triplets, train_triplet_epoch
+from fix_data import jp2loader
+import tempfile
+
+# In[ ]:
+with tempfile.TemporaryDirectory() as directory:
+    path = "images/14TNM"
+    jp2s = 5
+    for root, dirs, files in os.walk(path):
+        jp2s = files
+
+    imgs = []
+    for x in jp2s:
+        img = jp2loader(x, path, directory)
+        imgs.append(img)
+
+    image = np.stack((imgs[0], imgs[1], imgs[2], imgs[3]), axis=2)
+    print("Classification Image Loaded")
+
+
+#image = np.array(ds.ReadAsArray())
+#image = np.moveaxis(image, 0, -1)
+#note--this orders the image channels as (Y (vertical), X (horizontal), bands)
+
+class pixelCoordinates:
+    """Holds pixel coordinates for tiles"""
+    def __init__(self,xmin,xmax,ymin,ymax):
+        self.xmin=xmin
+        self.xmax=xmax
+        self.ymin=ymin
+        self.ymax=ymax
+
+def extractTile(inputRaster,pixelCoordinates):
+    """Extracts a tile from a given raster with given pixel coordinates"""
+    tile = inputRaster[pixelCoordinates.ymin:pixelCoordinates.ymax,                       pixelCoordinates.xmin:pixelCoordinates.xmax, :]
+    #clip because NA values are encoded as a super negative value
+    tile=np.clip(tile,0,None)
+    tile=np.swapaxes(tile,0,2)
+    tile=tile[np.newaxis]
+    tile=torch.from_numpy(tile).float()
+    return(tile)
+
+def extractTile2(inputRaster,pixelCoordinates):
+    """Extracts a tile from a given raster with given pixel coordinates"""
+    tile = inputRaster[pixelCoordinates.ymin:pixelCoordinates.ymax,                       pixelCoordinates.xmin:pixelCoordinates.xmax, :]
+    return(tile)
+
+def label(tile,tileNet,ClassCoordinates,raster):
+    """Takes a tile, a tileNet model, a ClassCoordinates object, and a raster, outputs
+    the classification of the tile as an integer"""
+    tile=extractTile(raster,tile)
+    labelVector=tileNet.encode(tile)
+    labelVector=labelVector.detach().numpy()
+    label=ClassCoordinates.knn.predict(labelVector)
+    return(label)
+
+
+def divideIntoTiles(inputRaster,dim):
+    """Takes a raster and divides it into tiles of the given dimension"""
+    tiles=[]
+    xmin=0
+    xmax=dim
+    ymin=0
+    ymax=dim
+    #iterate down the Y values
+    for i in range(0,inputRaster.shape[0]//dim):
+        #iterate across the X values
+        for j in range(0,inputRaster.shape[1]//dim):
+            coords=pixelCoordinates(xmin,xmax,ymin,ymax)
+            tiles.append(coords)
+            xmin+=dim
+            xmax+=dim
+        xmin=0
+        xmax=dim
+        ymin+=dim
+        ymax+=dim
+    return(tiles)
+
+def applyLabel(label,array,coords):
+    """Takes an array and sets the cells within the given coordinates to the
+    given label value"""
+    array[coords.ymin:coords.ymax,          coords.xmin:coords.xmax]=label
+    return(array)
+
+def makeClassification(inputRaster,coordsList,tileNet,ClassCoordinates):
+    """Takes a raster, list of coordinates, TileNet model, and ClassCoordinates
+    object, outputs a raster with the same dimensions as inputRaster, classified
+    according to the given model/classes"""
+    output=np.zeros(inputRaster[:,:,0].shape)
+    for i,tileCoords in enumerate(coordsList):
+        tileLabel=label(tileCoords,tileNet,ClassCoordinates,inputRaster)
+        if i % 1000==0:
+            print("Completed "+str(i) + " Tiles")
+        output=applyLabel(tileLabel,output,tileCoords)
+    return(output)
+
+class ClassCoordinates:
+    """Class that prompts user to input the points and classifications they want. Click
+    to add a point, press enter to move to a new classification."""
+    def __init__(self,imagePath,dim):
+        #get_ipython().run_line_magic('matplotlib', 'qt')
+        self.classID=0
+
+        imageDis = np.stack((imgs[2],imgs[1],imgs[0]), axis=2)
+
+        imageDis = cv2.normalize(imageDis,None,0,255,cv2.NORM_MINMAX,cv2.CV_8U)
+        imageDis = imageDis + 40
+        #img=mpimg.imread(imagePath)
+        fig, ax = plt.subplots()
+        ax.imshow(imageDis)
+        ax.set_title('Select Points for class: '+str(self.classID)                     +'\n click to add a tile, press enter for a new class',fontsize=20)
+
+        self.coordsList=[]
+        self.classList=[]
+        #we hold rectangles on screen here so we can remove them when enter is pressed
+        self.currentRectangles=[]
+        
+        def onclick(event):
+            x=int(round(event.xdata))
+            y=int(round(event.ydata))
+            newCoords=pixelCoordinates(x,x+dim,y,y+dim)
+            print("Added this tile to the coordinates: \n             xmin: %d \n             xmax: %d \n             ymin: %d \n             ymax: %d \n" %(x,x+dim,y,y+dim))
+            self.coordsList.append(newCoords)
+            self.classList.append(self.classID)
+            rect = patches.Rectangle((x,y),dim,dim,linewidth=2,edgecolor='r',facecolor='none')
+            ax.add_patch(rect)
+            self.currentRectangles.append(rect)
+            fig.canvas.draw()
+        
+        def onkey(event):
+            if event.key=="enter":
+                self.classID += 1
+                ax.set_title('Select Points for class: '+str(self.classID)                              +'\n click to add a tile, press enter for a new class',fontsize=20)
+                for rect in self.currentRectangles:
+                    rect.remove()
+                self.currentRectangles=[]
+                fig.canvas.draw()
+        
+        cid = fig.canvas.mpl_connect('button_press_event', onclick)
+        cidKey = fig.canvas.mpl_connect('key_press_event', onkey)
+        plt.show(block=True)
+
+    def embed(self,img,tileNet,dim,neighborsConstant):
+        """Embeds all the chosen points to vectors with
+        the given TileNet model object"""
+        vectors=np.zeros((len(self.coordsList),dim))
+        for i, coords in enumerate(self.coordsList):
+            tile=extractTile(img,coords)
+            vector=tileNet.encode(tile)
+            vector=vector.detach().numpy()
+            vectors[i]=vector
+
+        self.vectors=vectors
+        self.knn = KNeighborsClassifier(n_neighbors=neighborsConstant)
+        self.knn.fit(self.vectors, self.classList)
+
+
+# In[ ]:
+
+
+import pickle
+in_channels = 4
+z_dim = 64
+TileNet = make_tilenet(in_channels=in_channels, z_dim=z_dim)
+TileNet.load_state_dict(torch.load("models/attempt1", map_location='cpu'))#Path to the model you trained with the training script
+TileNet.eval()
+
+tiles=divideIntoTiles(image,10)
+
+
+# In[ ]:
+
+
+classes=ClassCoordinates("images/14TNM",10) #Path to the image you want to classify
+classes.embed(image,TileNet,64,9)
+
+
+# In[ ]:
+
+
+classif=makeClassification(image,tiles,TileNet,classes)
+
+
+# In[ ]:
+
+
+import matplotlib.pyplot as plt
+#get_ipython().run_line_magic('matplotlib', 'qt')
+plt.imshow(classif)
+plt.show(block=True)
